@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 var net = require('net'),
-    socks = require('./socks.js');
+    socks = require('./socks.js'),
+    authFile = require('./auth/authFile.js');
 
 // Create server
 // The server accepts SOCKS connections. This particular server acts as a proxy.
@@ -55,6 +56,11 @@ server.on('error', function (e) {
         }, 10000);
     }
 });
+
+delete server.knownMethods[socks.AUTHENTICATION.NOAUTH];
+server.authenticator = new authFile("passwd");
+server.authenticator.readFile();
+
 server.listen(PORT, HOST);
 
 // vim: set filetype=javascript syntax=javascript :

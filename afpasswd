@@ -1,0 +1,76 @@
+#!/usr/bin/env node
+
+var authFile = require("./auth/authFile.js");
+// var readline = require("readline");
+var opts = require("commander");
+
+opts
+    .version("0.0.1")
+    .option("-f, --file <file>", "File to read and write")
+    .option("-a, --add <username>", "Add the user. Updates the user if they already exist")
+    .option("-r, --remove <username>", "Remove the user")
+    .option("-t, --test <username>", "Test a user's password")
+    .option("-p, --password <password>", "Provide the password on the commandline")
+    .parse(process.argv);
+
+if (!opts.file) {
+    console.error("A filename must be provided");
+    process.exit(-1);
+}
+
+if (opts.add && opts.remove) {
+    console.error("Only one of --add or --remove may be specified");
+    process.exit(-1);
+}
+
+// Load the file (if it exists)
+var file = new authFile(opts.file);
+
+try {
+    file.readFile();
+} catch (e) {
+    console.error("Error loading file ", e);
+}
+
+function checkPassword(user, pw) {
+    var ok = file.verifyPassword(user, pw);
+    
+    console.log(ok ? "Password ok" : "Password FAILED");
+    process.exit(ok ? 0 : -10);
+}
+
+function done() {
+    file.writeFile();
+
+    process.exit(0);    
+}
+
+if (opts.add) {
+    
+    if ("function" === typeof opts.password) {
+        // Prompt for the password
+        opts.password("Password for "+opts.add+" >", function(pw) {
+            file.setUser(opts.add, pw);
+            done();
+        });
+    } else {
+        file.setUser(opts.add, opts.password);
+        done();
+    }
+} else if (opts.test) {
+    if ("function" === typeof opts.password) {
+        // Prompt for the password
+        opts.password("Password for "+opts.test+" >", function(pw) {
+            checkPassword(opts.test, pw);
+        });
+    } else {
+        checkPassword(opts.test, opts.password);
+    }
+} else if (opts.remove) {
+    file.removeUser(opts.remove);
+    done();
+} else {
+    console.log("No one to add or remove.");
+    done();
+}
+

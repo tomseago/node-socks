@@ -1,7 +1,7 @@
 var net = require('net'),
     util = require('util'),
     log = function(args) {
-        //console.log(args);
+        console.log.apply(console,arguments);
     },
     info = console.info,
     errorLog = console.error,
@@ -68,21 +68,32 @@ var net = require('net'),
 
 function createSocksServer(cb) {
     var socksServer = net.createServer();
+
+    socksServer.knownMethods = {};
+    socksServer.knownMethods[AUTHENTICATION.NOAUTH] = noAuthMethod;
+    socksServer.knownMethods[AUTHENTICATION.USERPASS] = userPassMethod;
+
     socksServer.on('listening', function() {
         var address = socksServer.address();
         info('LISTENING %s:%s', address.address, address.port);
     });
     socksServer.on('connection', function(socket) {
         info('CONNECTED %s:%s', socket.remoteAddress, socket.remotePort);
-        initSocksConnection.bind(socket)(cb);
+        initSocksConnection.bind(socket)(cb, socksServer.knownMethods);
     });
+    
+
     return socksServer;
 }
 //
 // socket is available as this
-function initSocksConnection(on_accept) {
+function initSocksConnection(on_accept, knownMethods) {
     // keep log of connected clients
     clients.push(this);
+    this.knownMethods = {};
+    for (key in knownMethods) {
+        this.knownMethods[key] = knownMethods[key].bind(this);
+    }
 
     // remove from clients on disconnect
     this.on('end', function() {
@@ -104,6 +115,8 @@ function initSocksConnection(on_accept) {
 function handshake(chunk) {
     this.removeListener('data', this.handshake);
 
+    log("chunk=",chunk);
+    
     var method_count = 0;
 
     // SOCKS Version 5 is the only support version
@@ -115,25 +128,55 @@ function handshake(chunk) {
     method_count = chunk[1];
 
     this.auth_methods = [];
+    var resp = new Buffer(2);
+    resp[0] = 0x05;
+    var foundMethod = false
+
     // i starts on 1, since we've read chunk 0 & 1 already
+    // Just take the supported methods in order
     for (var i=2; i < method_count + 2; i++) {
+        log("auth method %d",chunk[i]);
         this.auth_methods.push(chunk[i]);
+        
+        //chunk[i] = AUTHENTICATION.USERPASS;
+        
+        var method = this.knownMethods[chunk[i]];
+        if (method) {
+            // We're done. Use this method
+            log("Selecting method %d", chunk[i]);
+            
+            // Send the response now about which method we are using
+            resp[1] = chunk[i];
+            this.write(resp);
+            
+            // Then immediately give the handler it's chance to decide what to do
+            method();
+            foundMethod = true;
+            break;
+        }
     }
     log('Supported auth methods: %j', this.auth_methods);
 
-    var resp = new Buffer(2);
-    resp[0] = 0x05;
-    if (this.auth_methods.indexOf(AUTHENTICATION.NOAUTH) > -1) {
-        log('Handing off to handleRequest');
-        this.handleRequest = handleRequest.bind(this);
-        this.on('data', this.handleRequest);
-        resp[1] = AUTHENTICATION.NOAUTH;
-        this.write(resp);
-    } else {
-        errorLog('Unsuported authentication method -- disconnecting');
+    if (!foundMethod) {
+        errorLog('Unsuported authentication method');
         resp[1] = 0xFF;
-        this.end(resp);
+        this.write(resp);
+        this.on('data', this.handshake);
     }
+    
+    
+    // if (this.auth_methods.indexOf(AUTHENTICATION.NOAUTH) > -1) {
+    //     
+    //     log('Handing off to handleRequest');
+    //     this.handleRequest = handleRequest.bind(this);
+    //     this.on('data', this.handleRequest);
+    //     resp[1] = AUTHENTICATION.NOAUTH;
+    //     this.write(resp);
+    // } else {
+    //     errorLog('Unsuported authentication method -- disconnecting');
+    //     resp[1] = 0xFF;
+    //     this.end(resp);
+    // }
 }
 
 function handleRequest(chunk) {
@@ -182,6 +225,72 @@ function proxyReady() {
 
 }
 
+//////
+function noAuthMethod() {
+    log('Handing off to handleRequest');
+    this.handleRequest = handleRequest.bind(this);
+    this.on('data', this.handleRequest);
+}
+
+/////
+function userPassDataHandler(chunk) {
+    this.removeListener('data', this.userPassDataHandler);
+    
+    var resp = new Buffer(2);
+    resp[0] = SOCKS_VERSION;
+    resp[1] = 0x01;
+    
+    if (chunk.length < 5) {
+        errorLog("userPassDataHandler: chunk length was < 5. Dropping");
+        this.end(resp);
+        return;
+    }
+
+    // Wrong version!
+    if (chunk[0] !== SOCKS_VERSION) {
+        errorLog('userPassDataHandler: wrong socks version: %d', chunk[0]);
+        this.end(resp);
+        return;
+    } 
+    
+    var userLen = chunk[1];
+    var offset = 2;
+    var user = chunk.toString("utf8", offset, userLen);
+    offset += userLen;
+    
+    var pwLen = chunk[offset];
+    var password = chunk.toString("utf8", offset, pwLen);
+    
+    log("user='%s' password='%s'", user, password);
+    
+    if (!this.authenticator || !this.authenticator.verifyPassword) {
+        errorLog("userPassDataHandler: no authenticator set on this connection. Denying user '%s'", user);
+        this.end(resp);
+        return;
+    }
+    
+    var passed = this.authenticator.verifyPassword(user, password);
+    
+    if (passed) {
+        log("user '%s' authenticated successfully", user);
+        this.handleRequest = handleRequest.bind(this);
+        this.on('data', this.handleRequest);
+        
+        resp[1] = 0x00;
+        this.write(resp);
+    } else {
+        log("user '%s' failed with wrong password", user);
+        this.end(resp);
+    }
+}
+
+function userPassMethod() {
+    log('Switching to userPassDataHandler');
+    this.userPassDataHandler = userPassDataHandler.bind(this);
+    this.on('data', this.userPassDataHandler);
+}
+
 module.exports = {
     createServer: createSocksServer
+    , AUTHENTICATION: AUTHENTICATION
 };
